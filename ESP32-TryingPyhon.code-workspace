@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "ESP32-TryingPyhon",
+			"path": "."
+		},
+		{
+			"name": "serial:/COM3",
+			"uri": "serial://com3/"
+		}
+	],
+	"settings": {}
+}
