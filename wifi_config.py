@@ -5,11 +5,12 @@ import ujson
 import time
 import socket
 import ure
-import machine  # For resetting the device
+import machine  # For resetting the device and using the watchdog
 import os
 
+# Ensure the relay is off
 relay = machine.Pin(15, machine.Pin.OUT, value=0)
-relay.value(0)  # Ensure relay is off
+relay.value(0)
 
 print(os.listdir())
 print(os.statvfs("/"))  # pylint: disable=no-member
@@ -27,6 +28,10 @@ green_led = machine.Pin(GREEN_LED_PIN, machine.Pin.OUT)
 # Make sure LEDs are off initially.
 yellow_led.value(0)
 green_led.value(0)
+
+# --- Added Constants and Hardware Watchdog ---
+AP_TIMEOUT = 600  # 10 minutes timeout for AP mode (in seconds)
+wdt = machine.WDT(timeout=45000)  # 45-second hardware watchdog
 
 def load_wifi_config():
     try:
@@ -69,8 +74,7 @@ def connect_to_wifi(ssid, password):
         green_led.value(0)
         return False
 
-    # For testing an open network, you might use:
-    # wlan.connect(ssid)   # Without password
+    # Connect to the given SSID with provided password.
     wlan.connect(ssid, password)
     print("Attempting to connect to WiFi '{}'...".format(ssid))
     
@@ -78,8 +82,9 @@ def connect_to_wifi(ssid, password):
     yellow_led.value(1)
     green_led.value(0)
     
-    # Increased timeout: wait up to 30 seconds (60 loops of 0.5 sec)
+    # Wait up to 30 seconds (in 60 loops of 0.5s each) to connect.
     for i in range(60):
+        wdt.feed()
         if wlan.isconnected():
             print("Connected to WiFi:", wlan.ifconfig())
             yellow_led.value(0)
@@ -89,21 +94,22 @@ def connect_to_wifi(ssid, password):
             green_led.value(0)
             return True
         print("Connecting... ({}/{})".format(i + 1, 60))
-        # Blink yellow LED during connection attempts
+        # Blink yellow LED during connection attempts.
         yellow_led.value(0)
         time.sleep(0.5)
         yellow_led.value(1)
         time.sleep(0.5)
+        wdt.feed()  # Feed watchdog in loop to prevent resets.
     print("Failed to connect to WiFi.")
     yellow_led.value(0)
     green_led.value(0)
     return False
 
 def start_access_point():
+    """Starts the device in AP mode with configuration for 10 minutes."""
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
     # Set up the AP with WPA/WPA2.
-    # For testing, you might temporarily use an open AP by setting authmode to network.AUTH_OPEN.
     ap.config(essid="PasaSys Wifi Config", authmode=network.AUTH_WPA_WPA2_PSK, password="pasasys123")
     print("Access Point started with SSID 'PasaSys Wifi Config'. AP config:", ap.ifconfig())
     
@@ -160,6 +166,7 @@ def start_config_server():
     """
     Starts a simple HTTP server that serves an HTML form for entering WiFi credentials.
     When the form is submitted, credentials are saved and the device will reboot.
+    The server also checks for the AP mode timeout and triggers a reboot if it expires.
     """
     addr = socket.getaddrinfo('0.0.0.0', 80)[0][-1]
     s = socket.socket()
@@ -167,8 +174,18 @@ def start_config_server():
     s.listen(1)
     print("Configuration server listening on", addr)
     
+    start_time = time.time()  # Mark the beginning of AP mode
     while True:
+        wdt.feed()
+        # Timeout check for AP mode: if no configuration for 10 minutes, reboot.
+        elapsed = time.time() - start_time
+        if elapsed > AP_TIMEOUT:
+            print("AP mode timeout reached. Rebooting device...")
+            time.sleep(1)  # Short delay before rebooting
+            machine.reset()
+        
         try:
+            s.settimeout(5.0)  # Set a timeout to prevent blocking indefinitely
             cl, addr = s.accept()
             print("Client connected from", addr)
             cl.settimeout(5.0)
@@ -187,7 +204,7 @@ def start_config_server():
             request_str = request.decode('utf-8')
             print("Request:", request_str)
             
-            # Serve the form on GET request
+            # Serve HTML form for GET request
             if "GET / " in request_str:
                 response = """\
 HTTP/1.0 200 OK
@@ -218,7 +235,7 @@ HTTP/1.0 200 OK
 </html>
 """
                 send_response(cl, response)
-            # Handle the POST request from the form
+            # Handle POST request (form submission)
             elif "POST / " in request_str:
                 cl_len = ure.search("Content-Length: (\d+)", request_str)
                 content_length = int(cl_len.group(1)) if cl_len else 0
@@ -280,11 +297,26 @@ HTTP/1.0 400 Bad Request
                 cl.close()
             except:
                 pass
+        wdt.feed()  # Keep feeding the watchdog periodically
 
 def setup_wifi():
+    """
+    Attempts connection to stored WiFi credentials up to 3 times.
+    If all attempts fail, it starts the AP mode with configuration server.
+    """
     ssid, password = load_wifi_config()
     if ssid and password:
-        if not connect_to_wifi(ssid, password):
+        connected = False
+        for attempt in range(5):
+            print("WiFi connection attempt {}/5".format(attempt + 1))
+            if connect_to_wifi(ssid, password):
+                connected = True
+                break
+            else:
+                print("Attempt {} failed.".format(attempt + 1))
+                time.sleep(2)
+                wdt.feed()
+        if not connected:
             print("Failed to connect using stored credentials. Starting AP mode.")
             start_access_point()
             start_config_server()  # Start the configuration portal

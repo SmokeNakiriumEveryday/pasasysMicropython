@@ -18,7 +18,7 @@ relay.value(0)  # Ensure relay is off
 # Global State & Configuration
 # ---------------------------
 # Initialize the watchdog timeela with a 10-second utut
-wdt = WDT(timeout=300000)  # Timeout in milliseconds (30 sec)
+wdt = WDT(timeout=300000)  # Timeout in milliseconds (300 sec)
 current_alert_state_temp = 'normal'
 current_alert_state_ph = 'normal'
 last_alert_upload_time_temp = 0
@@ -26,10 +26,6 @@ last_alert_upload_time_ph = 0
 token_refresh_time = 0  # Track when token was last refreshed
 TOKEN_EXPIRY_TIME = 3300  # 55 minutes (in seconds)+
 token = None  # Will be set after Firebase login
-
-# Feeding settings
-FEEDING_TOLERANCE = 60 * 3  # 3 mins  tolerance
-last_feeding_timestamp = 0  # Track last feeding time
 
 # Temperature daily stats
 highest_temp = -100.0
@@ -53,7 +49,7 @@ ph_count = 0
 ph_above_threshold_count = 0
 ph_below_threshold_count = 0
 THRESHOLD_PH_HIGH = 8.5
-THRESHOLD_PH_LOW = 6.5
+THRESHOLD_PH_LOW = 7.0
 ph_threshold_counts = { 
     "morning": {"above": 0, "below": 0},
     "afternoon": {"above": 0, "below": 0},
@@ -138,79 +134,82 @@ pH_pin = ADC(Pin(34))  # Connect pH sensor to GPIO34 (ADC1_CH6)
 pH_pin.atten(ADC.ATTN_11DB)  # Set attenuation to 11dB for full range (0-3.3V)
 
 # Calibration data
-calibration_value = 20.83
+calibration_value = 20.23
 SLOPE = -5.70  # Slope of the pH sensor
 
-def read_ph(max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            wdt.feed()
-            # Create a buffer for sensor readings
-            buffer_arr = [0] * 20
-            for i in range(20):
-                buffer_arr[i] = pH_pin.read()
-                time.sleep_ms(30)
-                wdt.feed()
-            buffer_arr.sort()
-            maybe_collect_gc()
-            # Average the middle 6 values to reduce outliers
-            avgval = sum(buffer_arr[2:8]) / 6
-            # Convert the average ADC value to a voltage (0-3.3V)
-            voltage = avgval * (3.3 / 4095.0)
-            # Calculate the pH using the calibration equation
-            ph_act = SLOPE * voltage + calibration_value
-            return ph_act
-        except Exception as e:
-            print(f"Attempt {attempt + 1}: Error reading pH sensor - {e}")
-            wdt.feed()
-            time.sleep(1)
-    print(f"Failed to read pH sensor after {max_retries} attempts.")
-    return None
-
-# # Calibration data
-# calibration_value = 20.83  # Calibration offset b
-# SLOPE = -5.70  # Slope of the pH sensor
-
-# # Buffer for averaging sensor readings
-# buffer_arr = [0] * 10
-
-# # pH sensor reading function with retry logic
+# WITH TEMPERATURE COMPENSATION
 # def read_ph(max_retries=3):
-#     for attempt in range(max_retries):
-#         try:
-#             wdt.feed()  # Feed the watchdog at the start of each attempt
-#             # Reset buffer for each reading
-#             buffer_arr = [0] * 10
+#     try:
+#         # Get current temperature
+#         temp = read_temperature_sensor()
+#         # print(f"[DEBUG] Temperature for pH compensation: {temp:.1f}°C")
+        
+#         # Read raw pH
+#         buffer_arr = [0] * 20
+#         for i in range(20):
+#             buffer_arr[i] = pH_pin.read()
+#             wdt.feed()  # Feed watchdog during readings
+        
+#         # Calculate raw pH
+#         avgval = sum(buffer_arr[2:8]) / 6
+#         voltage = avgval * (3.3 / 4095.0)
+#         raw_ph = SLOPE * voltage + calibration_value
+        
+#         # Apply temperature compensation
+#         if temp is not None:
+#             compensated_ph = raw_ph + (temp - 25) * 0.03
+#             # print(f"[DEBUG] Raw pH: {raw_ph:.2f}")
+#             # print(f"[DEBUG] Compensated pH: {compensated_ph:.2f}")
+#             return compensated_ph
+#         return raw_ph
+        
+#     except Exception as e:
+#         print(f"[pH ERROR]: Error reading pH: {e}")
+#         wdt.feed()  # Feed watchdog on error
+#         return None
+        
+#     finally:
+#         maybe_collect_gc()  # Clean up memory regardless of success/failure
+#         wdt.feed()  # Final watchdog feed
 
-#             # Read 10 sensor values into the buffer
-#             for i in range(10):
-#                 buffer_arr[i] = pH_pin.read()
-#                 time.sleep_ms(30)  # Small delay between readings
-#                 wdt.feed()
-
-#             # Sort the buffer to remove outliers
-#             buffer_arr.sort()
-
-#             maybe_collect_gc()
-
-#             # Calculate the average of the middle 6 values
-#             avgval = sum(buffer_arr[2:8]) / 6
-
-#             # Convert the average value to voltage (0-3.3V)
-#             voltage = avgval * (3.3 / 4095.0)
-
-#             # Calculate the pH value using the calibration formula
-#             ph_act = SLOPE * voltage + calibration_value
-
-#             return ph_act
-#         except Exception as e:
-#             print(f"Attempt {attempt + 1}: Error reading pH sensor - {e}")
-#             wdt.feed()
-#             print("read ph function line: 157 ", gc.mem_free()) #pylint: disable=no-member
-#             time.sleep(1)
-    
-#     print(f"Failed to read pH sensor after {max_retries} attempts.")
-#     return None
+def read_ph(max_retries=3):
+    try:
+        # Get current temperature
+        temp = read_temperature_sensor()
+        print(f"[DEBUG] Temperature for pH compensation: {temp:.1f}°C")
+        
+        # Read raw pH
+        buffer_arr = [0] * 30  # Using 30 samples
+        for i in range(30):
+            buffer_arr[i] = pH_pin.read()
+            time.sleep_ms(10)
+            wdt.feed()
+        
+        # Calculate raw pH
+        buffer_arr.sort()
+        avgval = sum(buffer_arr[5:25]) / 20  # Using middle 20 values
+        voltage = avgval * (3.3 / 4095.0)
+        raw_ph = SLOPE * voltage + calibration_value
+        
+        # Print both non-rounded and raw values for comparison
+        print(f"[DEBUG] Non-rounded pH: {raw_ph}")
+        print(f"[DEBUG] Raw pH: {raw_ph:.1f}")
+        
+        if temp is not None:
+            compensated_ph = raw_ph - ((temp - 25) * 0.03)
+            print(f"[DEBUG] Compensated pH: {compensated_ph:.2f}")  # Shows 2 decimal places
+            return round(compensated_ph, 2)  # Returns value like 7.06
+        
+        return round(raw_ph, 2)  # Returns value like 7.06
+        
+    except Exception as e:
+        print(f"[pH ERROR]: Error reading pH: {e}")
+        wdt.feed()
+        return None
+        
+    finally:
+        maybe_collect_gc()
+        wdt.feed()
 
 
 # ---------------------------
@@ -268,7 +267,7 @@ def monitor_memory():
     alloc = gc.mem_alloc() #pylint: disable=no-member
     total = free + alloc
     print("Memory usage -> Allocated: {} bytes, Free: {} bytes, Total: {} bytes".format(alloc, free, total))
-    # Optionally, try to allocate a large block to test for fragmentation:
+    
     try:
         block_size = 1024 * 10  # try to allocate 10KB
         buf = bytearray(block_size)
@@ -531,7 +530,6 @@ def set_servo_angle(angle):
 # ---------------------------
 # Automated Feeding & Servo Setup
 # ---------------------------
-FEEDING_TIMES = [(5, 0), (18, 0)]  # 5 AM and 6 PM
 last_feeding_check = 0
 FEEDING_CHECK_INTERVAL = 60 * 2  # every minute
 
@@ -543,16 +541,67 @@ servo = machine.PWM(servo_pin, freq=50)
 # Firebase Listener for Servo Control
 # ---------------------------
 
-def is_feeding_time():
-    current_time = time.localtime()
-    seconds_now = current_time[3] * 3600 + current_time[4] * 60 + current_time[5]
-    for hour, minute in FEEDING_TIMES:
-        maybe_collect_gc()
-        wdt.feed()
-        scheduled_seconds = hour * 3600 + minute * 60
-        if abs(seconds_now - scheduled_seconds) <= FEEDING_TOLERANCE:
-            return True, scheduled_seconds
-    return False, None
+# Define feeding periods
+FEEDING_PERIODS = {
+    "morning": {
+        "hour": 5,
+    },
+    "evening": {
+        "hour": 18,
+    }
+}
+
+# Add function to restore feeding status
+def restore_feeding_status():
+    try:
+        current_date = "{:04d}-{:02d}-{:02d}".format(*time.localtime()[:3])
+        url = f"{FIREBASE_URL}/feedingStatus/{current_date}.json?auth={token}"
+        response = urequests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                for period in FEEDING_PERIODS:
+                    FEEDING_PERIODS[period]["completed"] = data.get(period, {}).get("completed", False)
+            else:
+                # Initialize new day
+                for period in FEEDING_PERIODS:
+                    FEEDING_PERIODS[period]["completed"] = False
+        response.close()
+    except Exception as e:
+        print(f"Error restoring feeding status: {e}")
+        # Default to False if can't restore
+        for period in FEEDING_PERIODS:
+            FEEDING_PERIODS[period]["completed"] = False
+
+def update_feeding_status(period, completed):
+    try:
+        current_date = "{:04d}-{:02d}-{:02d}".format(*time.localtime()[:3])
+        data = {
+            "completed": completed,
+            "timestamp": construct_timestamp()
+        }
+        upload_data(f"/feedingStatus/{current_date}/{period}", data)
+    except Exception as e:
+        print(f"Error updating feeding status: {e}")
+
+# Modify check_feeding_schedule
+def check_feeding_schedule():
+    current_hour = time.localtime()[3]
+    
+    # Reset at midnight
+    if current_hour == 0:
+        for period in FEEDING_PERIODS:
+            FEEDING_PERIODS[period]["completed"] = False
+            update_feeding_status(period, False)
+    
+    for period, config in FEEDING_PERIODS.items():
+        if current_hour >= config["hour"] and not config.get("completed", False):
+            print(f"[FEEDING DEBUG] Attempting {period} feeding...")
+            if feed_prawn(is_automated=True):
+                FEEDING_PERIODS[period]["completed"] = True
+                update_feeding_status(period, True)
+                print(f"[FEEDING]: Successfully completed {period} feeding")
+
 
 def feed_prawn(is_automated=False):
     try:
@@ -637,28 +686,6 @@ def check_servo_control(max_retries=1):
         time.sleep(1)
 
 
-
-
-
-# Set a 5-hour cooldown (5 * 3600 seconds)
-FEEDING_COOLDOWN = 5 * 3600
-counter_for_autofeed_cd = 0
-
-
-def check_automated_feeding():
-    global last_feeding_timestamp
-    wdt.feed()  # Feed the watchdog at the start of each attempt
-    feeding_due, scheduled_seconds = is_feeding_time()
-    if feeding_due:
-        current_timestamp = time.time()
-        # Check if 5 hours have elapsed since the last automated feeding
-        if current_timestamp - last_feeding_timestamp > FEEDING_COOLDOWN:
-            if counter_for_autofeed_cd == 0:
-                feed_prawn(is_automated=True)
-                counter_for_autofeed_cd += 1
-                last_feeding_timestamp = current_timestamp
-        else:
-            print("Automated feeding skipped: cooldown not yet elapsed.")
 # ---------------------------
 # Now that restore_daily_data is defined, we check WiFi and call it
 # ---------------------------
@@ -668,6 +695,7 @@ if wlan.isconnected():
         set_time()
         print("Current device time:", construct_timestamp())
         restore_daily_data()  # Now defined above
+        restore_feeding_status()
         print("initializing servo to 0")
         set_servo_angle(0)
         time.sleep(2)
@@ -680,8 +708,35 @@ else:
 # ---------------------------
 # Notification Function
 # ---------------------------
-def send_notification(message, status, component):
+# def send_notification(message, status, component):
 
+#     current_time = time.localtime()
+#     date_str = "{:04d}-{:02d}-{:02d}".format(current_time[0], current_time[1], current_time[2])
+#     time_str = "{:02d}:{:02d}:{:02d}".format(current_time[3], current_time[4], current_time[5])
+#     timestamp_str = construct_timestamp()
+    
+#     notification_data = {
+#         "message": message,
+#         "status": status,
+#         "timestamp": timestamp_str,
+#         "component": component,
+#         "type": status.split('_')[0] if '_' in status else status
+#     }
+
+#     wdt.feed()  # Feed the watchdog at the start of each attempt
+#     maybe_collect_gc()
+#     comp_status = upload_data(f'/componentNotifications/{component}/{date_str}/{time_str}', notification_data, method='PUT')
+#     dash_status = upload_data(f'/dashboardNotifications/{date_str}/{time_str}', notification_data, method='PUT')
+    
+#     if comp_status == 200 and dash_status == 200:
+#         print(f'[NOTIFICATION]: Notification sent successfully: {message}')
+#     else:
+#         print(f'Failed to send notification: Component: {comp_status if comp_status else "No response"}, '
+#               f'Dashboard: {dash_status if dash_status else "No response"}')
+#         wdt.feed()
+#         maybe_collect_gc()
+
+def send_notification(message, status, component):
     current_time = time.localtime()
     date_str = "{:04d}-{:02d}-{:02d}".format(current_time[0], current_time[1], current_time[2])
     time_str = "{:02d}:{:02d}:{:02d}".format(current_time[3], current_time[4], current_time[5])
@@ -695,18 +750,16 @@ def send_notification(message, status, component):
         "type": status.split('_')[0] if '_' in status else status
     }
 
-    wdt.feed()  # Feed the watchdog at the start of each attempt
-    maybe_collect_gc()
+    # Add these debug prints
+    print(f"[NOTIFICATION DEBUG] Component: {component}")
+    print(f"[NOTIFICATION DEBUG] Path: /componentNotifications/{component}/{date_str}/{time_str}")
+    print(f"[NOTIFICATION DEBUG] Data: {notification_data}")
+    
     comp_status = upload_data(f'/componentNotifications/{component}/{date_str}/{time_str}', notification_data, method='PUT')
     dash_status = upload_data(f'/dashboardNotifications/{date_str}/{time_str}', notification_data, method='PUT')
     
-    if comp_status == 200 and dash_status == 200:
-        print(f'[NOTIFICATION]: Notification sent successfully: {message}')
-    else:
-        print(f'Failed to send notification: Component: {comp_status if comp_status else "No response"}, '
-              f'Dashboard: {dash_status if dash_status else "No response"}')
-        wdt.feed()
-        maybe_collect_gc()
+    print(f"[NOTIFICATION DEBUG] Component status: {comp_status}")
+    print(f"[NOTIFICATION DEBUG] Dashboard status: {dash_status}")
 
 # ---------------------------
 # Sensor Reading Functions
@@ -802,75 +855,105 @@ last_threshold_update = {
     "pH": 0
 }
 
-COOLDOWN_PERIOD = 60 *30  # in seconds (30 minutes)
+COOLDOWN_PERIOD = 60 * 5  # 5 minutes
+
 
 def handle_alert_state_temp(temp, current_hour):
     global current_alert_state_temp, above_threshold_count, below_threshold_count, threshold_counts
-    new_state = 'above' if temp > THRESHOLD_TEMP_HIGH else 'below' if temp < THRESHOLD_TEMP_LOW else 'normal'
+    
+    # Convert to whole number for comparison
+    temp_whole = int(temp)
+    threshold_high_whole = int(THRESHOLD_TEMP_HIGH)
+    threshold_low_whole = int(THRESHOLD_TEMP_LOW)
+    
+    # Determine new state using whole numbers
+    new_state = 'above' if temp_whole > threshold_high_whole else 'below' if temp_whole < threshold_low_whole else 'normal'
+    
     current_time_local = time.time()
+    time_period = get_time_period(current_hour)
 
-    # Retrieve last notification time from Firebase
+    # # Debug prints
+    # print(f"[TEMP DEBUG] Raw temp: {temp:.1f}°C, Whole number: {temp_whole}°C")
+    # print(f"[TEMP DEBUG] Current state: {current_alert_state_temp}, New state: {new_state}")
+    # print(f"[TEMP DEBUG] Thresholds - High: {threshold_high_whole}°C, Low: {threshold_low_whole}°C")
+
     last_notif = get_last_notification("temperature")
     if last_notif is None:
         last_notif = 0
+    
+    # print(f"[TEMP DEBUG] Last notification time: {last_notif}")
+    # print(f"[TEMP DEBUG] Current time: {current_time_local}")
+    # print(f"[TEMP DEBUG] Time since last notification: {current_time_local - last_notif} seconds")
+    # # print(f"[TEMP DEBUG] Cooldown period: {COOLDOWN_PERIOD} seconds")
 
-    # Only process if state changed or abnormal, and if cooldown has passed:
     if new_state != current_alert_state_temp and (current_time_local - last_notif) >= COOLDOWN_PERIOD:
-        time_period = get_time_period(current_hour)
+        print(f"[TEMP DEBUG] State change detected! Sending notification for: {new_state}")
         if new_state == 'above':
             above_threshold_count += 1
-            # Corrected dictionary access
             threshold_counts[time_period]["above"] += 1
-            send_notification("Temperature went above threshold", "temp_above", "temperature")
+            # Remove degree symbol from message
+            message = f"Temperature went above threshold: {temp:.1f}C (Limit: {threshold_high_whole}C)"
+            print(f"[TEMP DEBUG] Sending above threshold notification. Count: {above_threshold_count}")
+            send_notification(message, "temp_above", "temperature")
         elif new_state == 'below':
             below_threshold_count += 1
             threshold_counts[time_period]["below"] += 1
-            send_notification("Temperature went below threshold", "temp_below", "temperature")
+            # Remove degree symbol from message
+            message = f"Temperature went below threshold: {temp:.1f}C (Limit: {threshold_low_whole}C)"
+            print(f"[TEMP DEBUG] Sending below threshold notification. Count: {below_threshold_count}")
+            send_notification(message, "temp_below", "temperature")
         else:
-            upload_data('/currentAlert', {'status': 'temp_normal'})
+            # Remove degree symbol from message
+            message = f"Temperature returned to normal: {temp:.1f}C"
+            print("[TEMP DEBUG] Temperature normalized, updating current alert")
+            upload_data('/currentTemperature', {'temperature': temp, 'status': 'temp_normal', 'message': message})
         
-        # Update Firebase with the new notification timestamp
         set_last_notification("temperature", current_time_local)
+        print(f"[TEMP DEBUG] Last notification time updated to: {current_time_local}")
+    else:
+        print("[TEMP DEBUG] No notification sent - Either state unchanged or in cooldown period")
     
+    print(f"[TEMP DEBUG] Threshold counts for {time_period}: {threshold_counts[time_period]}")
     current_alert_state_temp = new_state
-
 
 def handle_alert_state_ph(ph, current_hour):
     global current_alert_state_ph, ph_above_threshold_count, ph_below_threshold_count, ph_threshold_counts
-    new_state = 'above' if ph > THRESHOLD_PH_HIGH else 'below' if ph < THRESHOLD_PH_LOW else 'normal'
+    # Round to 1 decimal place for comparison
+    CHANGE_THRESHOLD = 0.05  # Minimum change to consider (e.g., 7.10 to 7.15)
+    ph_rounded = round(ph, 2)  # Keep 2 decimal places instead of 1
+    
+    new_state = 'above' if ph_rounded > THRESHOLD_PH_HIGH else 'below' if ph_rounded < THRESHOLD_PH_LOW else 'normal'
     current_time_local = time.time()
+    time_period = get_time_period(current_hour)
 
-    # Retrieve last notification time from Firebase
     last_notif = get_last_notification("pH")
     if last_notif is None:
         last_notif = 0
 
-    # Process alert only if state changed and cooldown has passed
     if new_state != current_alert_state_ph and (current_time_local - last_notif) >= COOLDOWN_PERIOD:
-        time_period = get_time_period(current_hour)
         if new_state == 'above':
             ph_above_threshold_count += 1
-            # Corrected dictionary access
             ph_threshold_counts[time_period]["above"] += 1
-            send_notification("pH went above threshold", "ph_above", "pH")
+            message = f"pH went above threshold: {ph:.1f} (Limit: {THRESHOLD_PH_HIGH})"
+            send_notification(message, "ph_above", "pH")
         elif new_state == 'below':
             ph_below_threshold_count += 1
             ph_threshold_counts[time_period]["below"] += 1
-            send_notification("pH went below threshold", "ph_below", "pH")
+            message = f"pH went below threshold: {ph:.1f} (Limit: {THRESHOLD_PH_LOW})"
+            send_notification(message, "ph_below", "pH")
         else:
-            upload_data('/currentPH', {"pH": ph})
+            message = f"pH returned to normal: {ph:.1f}"
+            upload_data('/currentPH', {"pH": ph, "message": message})
         
         set_last_notification("pH", current_time_local)
     
     current_alert_state_ph = new_state
-
 
 def push_time_based_counts():
     current_time_struct = time.localtime()
     maybe_collect_gc()
     update_time_based_counts("temperature", threshold_counts)
     update_time_based_counts("pH", ph_threshold_counts)
-    # Optionally, you can log or notify that the counts have been updated.
 
 
 
@@ -1004,9 +1087,33 @@ def push_overtime_readings(temp, ph):
     ph_status = upload_data(ph_path, {"timestamp": current_ts, "pH": ph}, method="POST")
     print("[DEBUG]: Temp upload status:", temp_status, "| pH upload status:", ph_status)
 
-
-
-
+def staggered_summary_upload(temp, ph):
+    """Performs summary uploads in stages to prevent memory spikes"""
+    try:
+        # Stage 1: Overtime readings
+        wdt.feed()
+        maybe_collect_gc()
+        print("[SUMMARY] Stage 1: Pushing overtime readings")
+        push_overtime_readings(temp, ph)
+        time.sleep(2)
+        
+        # Stage 2: Threshold counts
+        wdt.feed()
+        maybe_collect_gc()
+        print("[SUMMARY] Stage 2: Pushing threshold counts")
+        push_time_based_counts()
+        time.sleep(2)
+        
+        # Stage 3: Daily stats
+        wdt.feed()
+        maybe_collect_gc()
+        print("[SUMMARY] Stage 3: Saving daily data")
+        save_daily_data()
+        
+        return True
+    except Exception as e:
+        print(f"[SUMMARY ERROR]: {e}")
+        return False
 
 
 # ---------------------------
@@ -1014,8 +1121,8 @@ def push_overtime_readings(temp, ph):
 # ---------------------------
 # TEST_MODE = False         # Set True for testing mode
 start_time = time.time()
-REAL_TIME_UPLOAD_INTERVAL = 120   # 2 minutes
-SUMMARY_UPLOAD_INTERVAL = 60 * 7.5     # 10 minutes
+REAL_TIME_UPLOAD_INTERVAL = 60   # 2 minutes
+SUMMARY_UPLOAD_INTERVAL = 60 * 10     # 10 minutes
 last_temp_upload_time = time.time()
 last_summary_upload_time = time.time()
 last_servo_check_time = time.time()   
@@ -1023,25 +1130,31 @@ last_feeding_check = time.time()
 SERVO_CHECK_INTERVAL = 10  # every 10 seconds
 last_date = (time.localtime()[0], time.localtime()[1], time.localtime()[2])
 summary_upload_count = 0  # global variable
+MAX_SUMMARY_UPLOADS = 5  # Reset after 5 successful summary uploads
 
 while True:
-
-    # # Read sensors once and use the readings
+    # 1. Basic sensor readings
     # if roms:
     #     maybe_collect_gc()
     #     temp = read_temperature_sensor()
     #     if temp is not None:
-    #         control_heating_rod(temp)
+    #         print(f"\n=== Temperature Reading ===")
+    #         print(f"Raw temperature: {temp:.1f}°C")
     # else:
     #     print("No DS sensor detected.")
     #     temp = None
 
+    # # 2. pH Reading with compensation
     # maybe_collect_gc()
-    # current_time_val = time.time()
-    # ph = read_ph()
-    # print("Temperature:", temp, "| pH:", ph)
-
-    # time.sleep(2)
+    # ph = read_ph()  # This will print both raw and compensated pH
+    
+    # # 3. Summary of readings
+    # print("\n=== Summary ===")
+    # print(f"Temperature: {temp:.1f}°C")
+    # print(f"Final pH: {ph:.1f}")
+    # print("-" * 30)
+    
+    # time.sleep(2)  # Short delay between readings
 
 
     # Feed the watchdog (reset the timer)
@@ -1075,7 +1188,8 @@ while True:
 
     if current_time_val - last_feeding_check >= FEEDING_CHECK_INTERVAL:
         maybe_collect_gc()
-        check_automated_feeding()
+        print("[FEEDING]: Checking automated feeding schedule")
+        check_feeding_schedule()  # Add this line
         last_feeding_check = current_time_val
 
     if current_time_val - last_servo_check_time >= SERVO_CHECK_INTERVAL:
@@ -1100,9 +1214,6 @@ while True:
             temp_count += 1
         else:
             print("Warning: Temperature reading is None")
-
-        
-
 
         if temp > highest_temp:
             highest_temp = temp
@@ -1154,27 +1265,23 @@ while True:
             last_temp_upload_time = time.time()
             print("[FREE MEMORY]: Free memory in the after uploading current ph and temp line: 945", gc.mem_free()) #pylint: disable=no-member 
             
+        # In the main loop, modify the summary upload section:
         if time.time() - last_summary_upload_time >= SUMMARY_UPLOAD_INTERVAL:
             maybe_collect_gc()
             wdt.feed()
-            print("[SUMMARY]: Data before pushing to overtime: Temperature:", temp, "| pH:", ph)
-            push_overtime_readings(temp, ph)
-            print("[SUMMARY]: Pushing Threshold Counts")
-            push_time_based_counts()  # Push the current threshold counts
-            print("[SUMMARY]: save daily data")
-            save_daily_data()
-            print("Temperature:", temp, "| pH:", ph)
-            last_summary_upload_time = time.time()
-
-            summary_upload_count += 1  # Increment the counter
-            print("===============================================")
-            print("Summary upload count:", summary_upload_count)
-            print("===============================================")
-            
-            if summary_upload_count >= 5:
-                print("Upload limit reached. Resetting device...")
-                time.sleep(10)  # Ensure operations complete
-                machine.reset()
+            print("[SUMMARY]: Starting staggered upload")
+            if staggered_summary_upload(temp, ph):
+                last_summary_upload_time = time.time()
+                summary_upload_count += 1
+                print(f"[SUMMARY]: Upload {summary_upload_count}/{MAX_SUMMARY_UPLOADS} completed")
+                
+                # Controlled reset after MAX_SUMMARY_UPLOADS
+                if summary_upload_count >= MAX_SUMMARY_UPLOADS:
+                    print("[SYSTEM]: Performing controlled reset after successful uploads")
+                    time.sleep(2)  # Allow time for message to be printed
+                    machine.reset()  # Perform soft reset
+            else:
+                print("[SUMMARY]: Upload failed")
 
         print("Temperature:", temp, "| pH:", ph)
         # monitor_memory()
