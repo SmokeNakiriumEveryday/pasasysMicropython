@@ -1,32 +1,22 @@
 # wifi_config.py
 # pylint: disable=import-error
+import time
+import gc
 import network
 import ujson
-import time
+import machine
 import socket
 import ure
-import machine  # For resetting the device
-import os
 
-relay = machine.Pin(15, machine.Pin.OUT, value=0)
-relay.value(0)  # Ensure relay is off
-
-print(os.listdir())
-print(os.statvfs("/"))  # pylint: disable=no-member
-
-CONFIG_FILE = "wifi_config.json"
-
-# --- LED Indicator Setup ---
-# Change these GPIO numbers as needed for your wiring.
-YELLOW_LED_PIN = 12    # Example GPIO for yellow LED
-GREEN_LED_PIN = 14     # Example GPIO for green LED
-
+# LED Pins
+YELLOW_LED_PIN = 12
+GREEN_LED_PIN = 14
 yellow_led = machine.Pin(YELLOW_LED_PIN, machine.Pin.OUT)
 green_led = machine.Pin(GREEN_LED_PIN, machine.Pin.OUT)
-
-# Make sure LEDs are off initially.
 yellow_led.value(0)
 green_led.value(0)
+
+CONFIG_FILE = "wifi_config.json"
 
 def load_wifi_config():
     try:
@@ -34,67 +24,52 @@ def load_wifi_config():
             config = ujson.load(f)
             return config.get("ssid"), config.get("password")
     except Exception as e:
-        print("No WiFi config found:", e)
+        print("[WIFI] Failed to load config:", e)
         return None, None
 
 def save_wifi_config(ssid, password):
-    config = {"ssid": ssid, "password": password}
     with open(CONFIG_FILE, "w") as f:
-        ujson.dump(config, f)
-    print("WiFi credentials saved.")
+        ujson.dump({"ssid": ssid, "password": password}, f)
+    print("[WIFI] Config saved.")
 
 def scan_networks(wlan):
-    """Scans for available WiFi networks and prints found SSIDs."""
-    print("Scanning for available networks...")
-    nets = wlan.scan()
-    available_ssids = []
-    for net in nets:
-        try:
-            net_ssid = net[0].decode('utf-8')
-        except Exception:
-            net_ssid = net[0]
-        print("Found network:", net_ssid)
-        available_ssids.append(net_ssid)
-    return available_ssids
+    print("[WIFI] Scanning for networks...")
+    try:
+        nets = wlan.scan()
+        for net in nets:
+            try:
+                ssid = net[0].decode()
+            except:
+                ssid = net[0]
+            print(" - Found:", ssid)
+    except Exception as e:
+        print("[WIFI] Scan failed:", e)
 
 def connect_to_wifi(ssid, password):
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
 
-    # Scan and verify the desired SSID is visible
-    available_ssids = scan_networks(wlan)
-    if ssid not in available_ssids:
-        print("SSID '{}' not found in scan results. Check hotspot settings.".format(ssid))
-        yellow_led.value(0)
-        green_led.value(0)
-        return False
+    gc.collect()
+    scan_networks(wlan)
 
-    # For testing an open network, you might use:
-    # wlan.connect(ssid)   # Without password
+    print("[WIFI] Connecting to:", ssid)
     wlan.connect(ssid, password)
-    print("Attempting to connect to WiFi '{}'...".format(ssid))
-    
-    # Turn on yellow LED while connecting; ensure green is off.
+
     yellow_led.value(1)
     green_led.value(0)
-    
-    # Increased timeout: wait up to 30 seconds (60 loops of 0.5 sec)
+
     for i in range(60):
         if wlan.isconnected():
-            print("Connected to WiFi:", wlan.ifconfig())
+            print("[WIFI] Connected:", wlan.ifconfig())
             yellow_led.value(0)
             green_led.value(1)
-            # Keep the green LED on for 5 seconds to indicate success.
-            time.sleep(5)
+            time.sleep(2)
             green_led.value(0)
             return True
-        print("Connecting... ({}/{})".format(i + 1, 60))
-        # Blink yellow LED during connection attempts
-        yellow_led.value(0)
         time.sleep(0.5)
-        yellow_led.value(1)
-        time.sleep(0.5)
-    print("Failed to connect to WiFi.")
+        yellow_led.value(i % 2)
+
+    print("[WIFI] Failed to connect.")
     yellow_led.value(0)
     green_led.value(0)
     return False
@@ -102,79 +77,102 @@ def connect_to_wifi(ssid, password):
 def start_access_point():
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
-    # Set up the AP with WPA/WPA2.
-    # For testing, you might temporarily use an open AP by setting authmode to network.AUTH_OPEN.
-    ap.config(essid="PasaSys Wifi Config", authmode=network.AUTH_WPA_WPA2_PSK, password="pasasys123")
-    print("Access Point started with SSID 'PasaSys Wifi Config'. AP config:", ap.ifconfig())
-    
-    # In AP mode, keep yellow LED on to show we're in configuration mode.
+    ap.config(essid="PasaSys Wifi Config", password="pasasys123", authmode=network.AUTH_WPA_WPA2_PSK)
+    print("[WIFI] AP Mode started:", ap.ifconfig())
+
     yellow_led.value(1)
     green_led.value(0)
-    
     return ap
 
 def url_decode(s):
-    """Simple URL decoding function that converts %XX escapes and plus signs to spaces."""
     res = ""
     i = 0
     while i < len(s):
-        c = s[i]
-        if c == '+':
+        if s[i] == '+':
             res += ' '
             i += 1
-        elif c == '%' and i + 2 < len(s):
+        elif s[i] == '%' and i + 2 < len(s):
             try:
-                hex_val = s[i+1:i+3]
-                res += chr(int(hex_val, 16))
+                res += chr(int(s[i+1:i+3], 16))
                 i += 3
-            except Exception as e:
-                res += c
+            except:
+                res += s[i]
                 i += 1
         else:
-            res += c
+            res += s[i]
             i += 1
     return res
 
 def parse_post_data(body):
     params = {}
-    pairs = body.split("&")
-    for pair in pairs:
+    for pair in body.split("&"):
         try:
-            key, value = pair.split("=")
-            key = url_decode(key)
-            value = url_decode(value)
-            params[key] = value
-        except Exception as e:
-            print("Error parsing parameter:", e)
+            key, val = pair.split("=")
+            params[url_decode(key)] = url_decode(val)
+        except:
+            pass
     return params
 
-def send_response(client, response):
+def send_response(client, html):
     try:
-        client.send(response)
-    except Exception as e:
-        print("Error sending response:", e)
+        client.send(html)
+    except:
+        pass
     finally:
         client.close()
 
 def start_config_server():
     """
     Starts a simple HTTP server that serves an HTML form for entering WiFi credentials.
-    When the form is submitted, credentials are saved and the device will reboot.
+    Reboots automatically after 5 minutes if no config is submitted.
     """
+    import time
+    import machine
+    import socket
+    import ure
+
     addr = socket.getaddrinfo('0.0.0.0', 80)[0][-1]
     s = socket.socket()
     s.bind(addr)
     s.listen(1)
     print("Configuration server listening on", addr)
-    
+
+    # Timeout timer
+    start_time = time.time()
+    TIMEOUT_SECONDS = 300  # 5 minutes
+    warned = False  # To only warn once at 30 seconds left
+
     while True:
+        # ⏱ Timeout check
+        elapsed = time.time() - start_time
+        remaining = TIMEOUT_SECONDS - elapsed
+
+        if remaining <= 0:
+            print("[TIMEOUT] No config submitted. Rebooting...")
+            yellow_led.value(0)
+            machine.reset()
+        elif remaining <= 30 and not warned:
+            print("[WARNING] 30 seconds remaining before reboot...")
+            warned = True
+
+        # Optional: LED blink faster in last 30 seconds
+        if remaining <= 30:
+            yellow_led.value(1)
+            time.sleep(0.2)
+            yellow_led.value(0)
+            time.sleep(0.2)
+        else:
+            yellow_led.value(1)
+            time.sleep(0.5)
+            yellow_led.value(0)
+            time.sleep(0.5)
+
         try:
             cl, addr = s.accept()
             print("Client connected from", addr)
             cl.settimeout(5.0)
             cl_file = cl.makefile('rwb', 0)
             request = b""
-            # Read HTTP headers until an empty line is found
             while True:
                 try:
                     line = cl_file.readline()
@@ -186,8 +184,7 @@ def start_config_server():
                 request += line
             request_str = request.decode('utf-8')
             print("Request:", request_str)
-            
-            # Serve the form on GET request
+
             if "GET / " in request_str:
                 response = """\
 HTTP/1.0 200 OK
@@ -218,7 +215,7 @@ HTTP/1.0 200 OK
 </html>
 """
                 send_response(cl, response)
-            # Handle the POST request from the form
+
             elif "POST / " in request_str:
                 cl_len = ure.search("Content-Length: (\d+)", request_str)
                 content_length = int(cl_len.group(1)) if cl_len else 0
@@ -280,18 +277,3 @@ HTTP/1.0 400 Bad Request
                 cl.close()
             except:
                 pass
-
-def setup_wifi():
-    ssid, password = load_wifi_config()
-    if ssid and password:
-        if not connect_to_wifi(ssid, password):
-            print("Failed to connect using stored credentials. Starting AP mode.")
-            start_access_point()
-            start_config_server()  # Start the configuration portal
-    else:
-        print("No stored credentials. Starting AP mode.")
-        start_access_point()
-        start_config_server()  # Start the configuration portal
-
-# Start the WiFi setup process
-setup_wifi()
